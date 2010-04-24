@@ -4,11 +4,12 @@ import subprocess
 import select
 import sys
 
-gdb_command = "gdb testme/testme"
-
 def error(msg):
     sys.stderr.write('ERROR: ' + msg + '\n')
-    sys.exit(1)    
+    sys.exit(1)
+
+def flush():
+    sys.stdout.flush()
 
 def read_answer(pipe, maxlines = -1, timeout = 1):
     """maxlines -1 means read until nothing to read until timeout"""
@@ -22,8 +23,9 @@ def read_answer(pipe, maxlines = -1, timeout = 1):
             lines[-1] += pipe.read(1)
             if lines[-1][-1] == '\n':
                 if len(lines) == maxlines: break
-                elif lines[-1] == '(gdb) ': break # got prompt, nothing more is coming
                 else: lines.append("")
+            if lines[-1] == '(gdb) ': 
+                break # got prompt, nothing more is coming
     return lines
 
 def start_gdb(gdb_command):
@@ -38,11 +40,11 @@ def start_gdb(gdb_command):
 
 def run_to_start_of_main(gdb):
     gdb.stdin.write('break main\n')
-    bp_row, gdb_prompt = read_answer(gdb.stdout, 2)
+    bp_row, gdb_prompt = read_answer(gdb.stdout, 5)
     if not bp_row.startswith('Breakpoint 1 at'):
         error("Could not set breakpoint to main. Got error:\n" + bp_row)
     gdb.stdin.write('run\n')
-    rows = read_answer(gdb.stdout, 6, 3)
+    rows = read_answer(gdb.stdout, 6, 8)
     if not len(rows) == 6 or not rows[-1].startswith('(gdb)'):
         error("Could not stop at start of main. Error:\n" + ''.join(rows))
 
@@ -85,11 +87,19 @@ def measure_private_dirty(gdb, pid):
             private_dirty += int(line.split()[1])
     return private_dirty
 
+def measure_private_mem(gdb, pid):
+    private = 0
+    for line in file("/proc/%s/smaps" % (pid,)):
+        if line.startswith('Private_'):
+            private += int(line.split()[1])
+    return private
+
 def step_and_measure_this_func(gdb, pid, measuring_func):
     bt = get_backtrace(gdb)
     orig_bt_length = len(bt) # if this changes, we are out of the func
     orig_func = bt[0].split(':')[0] # everything before line number
     print "step_and_measure_this_func:", orig_func
+    flush()
     data = measuring_func(gdb, pid)
     rows_and_data = [(bt[0].strip(), data)]
     while 1:
@@ -137,18 +147,22 @@ def walk_to_func(gdb, deeper_steps):
         step_in_current_func = 0
     return True
 
-def report_findings(results, deeper_steps):
+def report_findings(results, current_path, deeper_steps):
     for dc in deeper_steps:
-        print "step %s needs a closer look: %s (growth: %s)" % (dc[0], results[dc[0]], dc[1])
+        print "step '%s': %s (growth: %s)" % (current_path + [dc[0]], results[dc[0]], dc[1])
+    flush()
 
 def main(argv):
     try:
         gdb_command = sys.argv[1]
     except:
         error("The first argument should be gdb command, like 'gdb /path/to/myapp'")
-    
-    # path to main is []: not a single step to subroutines
-    paths_to_interesting_subroutines = [[]]
+
+    if len(sys.argv) > 2:
+        paths_to_interesting_subroutines = eval(sys.argv[2])
+    else:    
+        # path to main is []: not a single step to subroutines
+        paths_to_interesting_subroutines = [[]]
 
     while paths_to_interesting_subroutines:
 
@@ -157,19 +171,21 @@ def main(argv):
         gdb = start_gdb(gdb_command)
         run_to_start_of_main(gdb)
         pid = get_pid_of_debugged_process(gdb)
-        print "running", pid, "walking to", current_path
+        print "running", pid, ", walking to", current_path
+        flush()
         
         if not walk_to_func(gdb, current_path):
             print "current_path", current_path, "was not a subroutine."
+            flush()
         else:
-            print "checking path", current_path
-            results = step_and_measure_this_func(gdb, pid, measure_private_dirty)
+            results = step_and_measure_this_func(gdb, pid, measure_private_mem)
             deeper_checks = find_need_for_deeper_checks(results)
-            report_findings(results, deeper_checks)
+            report_findings(results, current_path, deeper_checks)
     
             paths_to_interesting_subroutines += [current_path + [dc[0]] for dc in deeper_checks]
 
         quit_gdb(gdb)
+    print "no more paths to interesting subroutines"
         
 if __name__ == '__main__':
     main(sys.argv)
