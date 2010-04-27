@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 
+# This script is public domain.
 # Author: antti.kervinen@nokia.com
 
 import subprocess
