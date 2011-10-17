@@ -1,20 +1,22 @@
 #!/usr/bin/env python
 
 # This script is public domain.
-# Author: antti.kervinen@nokia.com
+# Author: antti.kervinen@intel.com
 
 import subprocess
 import select
+import getopt
 import sys
+import os
 
 def print_usage():
     print ''
-    print 'Usage: ' + sys.argv[0] + ' gdb_command [measuring_func [paths_to_subroutines]]'
+    print 'Usage: ' + sys.argv[0] + ' gdb_command [options] [measure [paths_to_subroutines]]'
     print ''
     print '    gdb_command must start the debugger with the debugged program'
     print '        Example: "gdb /path/to/myapp"'
     print ''
-    print '    measuring_func (optional) specifies the function to be used'
+    print '    measure (optional) specifies the function to be used'
     print '        for evaluating the debugged program state after every step'
     print '        taken by the debugger. Available measuring functions:'
     print '        - ' + '\n        - '.join([f for f in globals().keys()
@@ -28,6 +30,12 @@ def print_usage():
     print '        "[[2], [0, 1]]" will debug the two functions reached by'
     print '        1) next - next - step, and'
     print '        2) step - next - step in the start of main in gdb.'
+    print ''
+    print '    Options:'
+    print '        -c<operator>'
+    print '            track change deeper if expression'
+    print '            current measured value <operator> previous measured value'
+    print '            evaluates to True. Default operator: ">"'
     print ''
 
 def error(msg):
@@ -71,7 +79,7 @@ def run_to_start_of_main(gdb):
         error("Could not set breakpoint to main. Got error:\n" + bp_row)
     gdb.stdin.write('run\n')
     rows = read_answer(gdb.stdout, 6, 8)
-    if not len(rows) == 6 or not rows[-1].startswith('(gdb)'):
+    if not rows[-1].startswith('(gdb)'):
         error("Could not stop at start of main. Error:\n" + ''.join(rows))
 
 def get_pid_of_debugged_process(gdb):
@@ -104,7 +112,9 @@ def step_into_subroutine(gdb):
 
 def quit_gdb(gdb):
     gdb.stdin.write('quit\n')
-    gdb.stdin.write('y\n')
+    try:
+        gdb.stdin.write('y\n')
+    except: pass
 
 # Measuring functions take gdb and pid as parameters and return a
 # number describing the current state of the process. Measuring
@@ -112,20 +122,33 @@ def quit_gdb(gdb):
 # returned valude is greater than it was before the previous step, the
 # previous step will be examined in more detail by later debugger
 # runs. Prefix the function names with 'measure_'
+
+def _sum_integers(filename, line_prefix, field_index):
+    total = 0
+    for line in file(filename):
+        if line.startswith(line_prefix):
+            total += int(line.split()[field_index])
+    return total
  
 def measure_private_dirty(gdb, pid):
-    private_dirty = 0
-    for line in file("/proc/%s/smaps" % (pid,)):
-        if line.startswith('Private_Dirty:'):
-            private_dirty += int(line.split()[1])
-    return private_dirty
+    return _sum_integers("/proc/%s/smaps" % (pid,),
+                         "Private_Dirty:", 1)
 
 def measure_private_mem(gdb, pid):
-    private = 0
-    for line in file("/proc/%s/smaps" % (pid,)):
-        if line.startswith('Private_'):
-            private += int(line.split()[1])
-    return private
+    return _sum_integers("/proc/%s/smaps" % (pid,),
+                         "Private_", 1)
+
+def measure_io_rchar(gdb, pid):
+    return _sum_integers("/proc/%s/io" % (pid,),
+                         "rchar:", 1)
+
+def measure_io_wchar(gdb, pid):
+    return _sum_integers("/proc/%s/io" % (pid,),
+                         "wchar:", 1)
+
+def measure_fd_count(gdb, pid):
+    return len(os.walk("/proc/%s/fd" % (pid,)).next()[2])
+
 
 def step_and_measure_current_func(gdb, pid, measuring_func):
     bt = get_backtrace(gdb)
@@ -147,14 +170,14 @@ def step_and_measure_current_func(gdb, pid, measuring_func):
         rows_and_data.append((bt[0].strip(), data))
     return rows_and_data
 
-def find_need_for_deeper_checks(rows_and_data):
+def find_need_for_deeper_checks(rows_and_data, track_if_true_function):
     steps = []
     step = 0
     if len(rows_and_data) == 0: return steps
     previous_value = rows_and_data[0][1]
     for row_and_data in rows_and_data[1:]:
         current_value = row_and_data[1]
-        if current_value > previous_value:
+        if track_if_true_function(current_value, previous_value):
             steps.append((step, current_value - previous_value))
             previous_value = current_value
         step += 1
@@ -186,18 +209,26 @@ def report_findings(results, current_path, deeper_steps):
     flush()
 
 def main(argv):
+
+    track_if_true = lambda curr, prev: curr > prev
+
+    opts, remainder = getopt.getopt(argv[1:], 'c:', [])
+    for opt, arg in opts:
+        if opt == '-c':
+            track_if_true = eval('lambda curr, prev: curr ' + arg + ' prev')
+        
     # 1st parameter: gdb command
     try:
-        gdb_command = sys.argv[1]
+        gdb_command = remainder[0]
         if gdb_command.startswith('-'): raise Exception()
     except:
         print_usage()
         error("Gdb command missing.")
 
     # 2nd parameter: measuring function (optional)
-    if len(sys.argv) > 2:
+    if len(remainder) > 1:
         try:
-            measuring_func = eval(sys.argv[2])
+            measuring_func = eval(remainder[1])
             if type(measuring_func) != type(main): raise Exception()
         except:
             print_usage()
@@ -206,9 +237,9 @@ def main(argv):
         measuring_func = measure_private_mem
 
     # 3rd parameter: paths to measured subroutines
-    if len(sys.argv) > 3:
+    if len(remainder) > 2:
         try:
-            paths_to_interesting_subroutines = eval(sys.argv[3])
+            paths_to_interesting_subroutines = eval(remainder[2])
             if type(paths_to_interesting_subroutines) != type([]): raise Exception()
         except:
             error('Invalid paths to subroutines')
@@ -228,12 +259,9 @@ def main(argv):
         run_to_start_of_main(gdb)
         pid = get_pid_of_debugged_process(gdb)
         
-        if not walk_to_func(gdb, current_path):
-            print "inspection cancelled: path", current_path, "was not a subroutine."
-            flush()
-        else:
-            results = step_and_measure_current_func(gdb, pid, measure_private_mem)
-            deeper_checks = find_need_for_deeper_checks(results)
+        if walk_to_func(gdb, current_path):
+            results = step_and_measure_current_func(gdb, pid, measuring_func)
+            deeper_checks = find_need_for_deeper_checks(results, track_if_true)
             report_findings(results, current_path, deeper_checks)
     
             paths_to_interesting_subroutines += [current_path + [dc[0]] for dc in deeper_checks]
