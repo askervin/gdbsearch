@@ -19,8 +19,9 @@ def print_usage():
     print '    measure (optional) specifies the function to be used'
     print '        for evaluating the debugged program state after every step'
     print '        taken by the debugger. Available measuring functions:'
-    print '        - ' + '\n        - '.join([f for f in globals().keys()
-                                             if f.startswith('measure_')])
+    l = [s[8:] for s in globals().keys() if s.startswith("measure_")]
+    l.sort()
+    print '        - ' + '\n        - '.join(l)
     print ''
     print '    paths_to_subroutines is a list of paths where paths are'
     print '        lists of indexes of "step" commands in gdb. If an index'
@@ -32,10 +33,11 @@ def print_usage():
     print '        2) step - next - step in the start of main in gdb.'
     print ''
     print '    Options:'
-    print '        -c<operator>'
-    print '            track change deeper if expression'
-    print '            current measured value <operator> previous measured value'
-    print '            evaluates to True. Default operator: ">"'
+    print '        -c<expression>'
+    print '            track change deeper in the code if the expression'
+    print '            evaluates to True. Two variables defined for expression:'
+    print '            n: new measurement, p: previous measurement.'
+    print '            Default expression: "n > p"'
     print ''
 
 def error(msg):
@@ -62,14 +64,17 @@ def read_answer(pipe, maxlines = -1, timeout = 1):
                 break # got prompt, nothing more is coming
     return lines
 
+def expect_prompt(answer):
+    if len(answer) == 0 or not answer[-1].startswith('(gdb)'):
+        error('Did not receive the gdb prompt. Got:\n' + ''.join(answer))
+
 def start_gdb(gdb_command):
     """returns gdb_pipes"""
     gdb = subprocess.Popen(gdb_command, shell=True,
                            stdin=subprocess.PIPE,
                            stdout=subprocess.PIPE)
     answer = read_answer(gdb.stdout)
-    if not answer[-1].startswith('(gdb)'):
-        error('Did not receive the gdb prompt. Got:\n' + ''.join(answer))
+    expect_prompt(answer)
     return gdb
 
 def run_to_start_of_main(gdb):
@@ -79,36 +84,36 @@ def run_to_start_of_main(gdb):
         error("Could not set breakpoint to main. Got error:\n" + bp_row)
     gdb.stdin.write('run\n')
     rows = read_answer(gdb.stdout, 6, 8)
-    if not rows[-1].startswith('(gdb)'):
-        error("Could not stop at start of main. Error:\n" + ''.join(rows))
+    expect_prompt(rows)
 
 def get_pid_of_debugged_process(gdb):
     gdb.stdin.write('info proc\n')
     rows = read_answer(gdb.stdout, 5)
     if not len(rows) == 5 or not rows[0].startswith('process'):
         error("Could not read process id. Answer started with:\n" + "".join(rows))
-    if not rows[-1].startswith('(gdb)'):
-        error("gdb prompt not found by get_pid_of_debugged_process. Got:\n" + "".join(rows))
+    expect_prompt(rows)
     return rows[0].split()[1]
 
 def get_backtrace(gdb):
     gdb.stdin.write('bt\n')
     rows = read_answer(gdb.stdout)
-    if not rows[-1].startswith('(gdb)'):
-        error("gdb prompt not found by get_backtrace. Got:\n" + "".join(rows))
+    expect_prompt(rows)
     return rows[:-1]
 
 def next_row(gdb):
     gdb.stdin.write('next\n')
     rows = read_answer(gdb.stdout)
-    if not rows[-1].startswith('(gdb)'):
-        error("gdb prompt not found by next_row. Got:\n" + "".join(rows))
+    if len(rows) > 1:
+        codeline = rows[-2]
+    else:
+        codeline = ""
+    expect_prompt(rows)
+    return codeline
 
 def step_into_subroutine(gdb):
     gdb.stdin.write('step\n')
     rows = read_answer(gdb.stdout)
-    if not rows[-1].startswith('(gdb)'):
-        error("gdb prompt not found by step_into_subroutine. Got:\n" + "".join(rows))
+    expect_prompt(rows)
 
 def quit_gdb(gdb):
     gdb.stdin.write('quit\n')
@@ -149,17 +154,16 @@ def measure_io_wchar(gdb, pid):
 def measure_fd_count(gdb, pid):
     return len(os.walk("/proc/%s/fd" % (pid,)).next()[2])
 
-
 def step_and_measure_current_func(gdb, pid, measuring_func):
     bt = get_backtrace(gdb)
     orig_bt_length = len(bt) # if this changes, we are out of the func
-    orig_func = bt[0].split(':')[0] # everything before line number
-    print "inspecting:", orig_func
+    orig_func = bt[0].rsplit(':',1)[0] # everything before line number
+    print "debug: inspecting:", orig_func
     flush()
     data = measuring_func(gdb, pid)
-    rows_and_data = [(bt[0].strip(), data)]
+    rows_and_data = [(bt[0].strip(), data, "")]
     while 1:
-        next_row(gdb)
+        codeline = next_row(gdb)
         bt = get_backtrace(gdb)
         if (len(bt) < 1 or
             len(bt) != orig_bt_length or
@@ -167,7 +171,7 @@ def step_and_measure_current_func(gdb, pid, measuring_func):
             # we are out of the func!
             break
         data = measuring_func(gdb, pid)
-        rows_and_data.append((bt[0].strip(), data))
+        rows_and_data.append((bt[0].strip(), data, codeline))
     return rows_and_data
 
 def find_need_for_deeper_checks(rows_and_data, track_if_true_function):
@@ -178,8 +182,8 @@ def find_need_for_deeper_checks(rows_and_data, track_if_true_function):
     for row_and_data in rows_and_data[1:]:
         current_value = row_and_data[1]
         if track_if_true_function(current_value, previous_value):
-            steps.append((step, current_value - previous_value))
-            previous_value = current_value
+            steps.append((step, current_value, previous_value))
+        previous_value = current_value
         step += 1
     return steps
 
@@ -205,7 +209,11 @@ def walk_to_func(gdb, deeper_steps):
 
 def report_findings(results, current_path, deeper_steps):
     for dc in deeper_steps:
-        print "growth %5s path %s %s" % (dc[1], current_path + [dc[0]], results[dc[0]])
+        step, current_value, previous_value = dc
+        codeline = results[step][2]
+        file_and_row = results[step][0]
+        print "%s -> %s %s %s" % (previous_value, current_value,
+                               file_and_row, codeline)
     flush()
 
 def main(argv):
@@ -215,8 +223,13 @@ def main(argv):
     opts, remainder = getopt.getopt(argv[1:], 'c:', [])
     for opt, arg in opts:
         if opt == '-c':
-            track_if_true = eval('lambda curr, prev: curr ' + arg + ' prev')
-        
+            try:
+                track_if_true = eval('lambda n, p: ' + arg)
+            except:
+                error('Illegal check function "%s".\n"' +
+                      'Example: "n > p + 100" is true if new measurement\n' +
+                      'was greater than previous by 100')
+
     # 1st parameter: gdb command
     try:
         gdb_command = remainder[0]
@@ -228,11 +241,11 @@ def main(argv):
     # 2nd parameter: measuring function (optional)
     if len(remainder) > 1:
         try:
-            measuring_func = eval(remainder[1])
+            measuring_func = eval("measure_" + remainder[1])
             if type(measuring_func) != type(main): raise Exception()
         except:
             print_usage()
-            error('Incorrect measuring function')
+            error('Incorrect measure "%s"' % (remainder[1],))
     else:
         measuring_func = measure_private_mem
 
