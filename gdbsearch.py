@@ -1,6 +1,5 @@
 #!/usr/bin/env python
 
-# This script is public domain.
 # Author: antti.kervinen@intel.com
 
 import subprocess
@@ -11,10 +10,9 @@ import os
 
 def print_usage():
     print ''
-    print 'Usage: ' + sys.argv[0] + ' gdb_command [options] [measure [paths_to_subroutines]]'
+    print 'Usage: gdbsearch gdb_command [options] [measure [paths_to_subroutines]]'
     print ''
-    print '    gdb_command must start the debugger with the debugged program'
-    print '        Example: "gdb /path/to/myapp"'
+    print '    gdb_command starts debugger with debugged program'
     print ''
     print '    measure (optional) specifies the function to be used'
     print '        for evaluating the debugged program state after every step'
@@ -33,11 +31,21 @@ def print_usage():
     print '        2) step - next - step in the start of main in gdb.'
     print ''
     print '    Options:'
-    print '        -c<expression>'
+    print '        -e <expression>'
     print '            track change deeper in the code if the expression'
     print '            evaluates to True. Two variables defined for expression:'
     print '            n: new measurement, p: previous measurement.'
     print '            Default expression: "n > p"'
+    print ''
+    print 'Examples:'
+    print ''
+    print '    gdbsearch "gdb ./myapp" private_mem'
+    print '        searches myapp program lines where memory consumption'
+    print '        (in terms of private memory) increases'
+    print ''
+    print '    gdbsearch -e "n > p + 100000" "gdb --args ./myapp myarg" io_rchar'
+    print '        runs "./myapp myarg" and searches program lines which cause'
+    print '        reading more than 100,000 bytes from any io source.'
     print ''
 
 def error(msg):
@@ -217,14 +225,14 @@ def report_findings(results, current_path, deeper_steps):
     flush()
 
 def main(argv):
-
     track_if_true = lambda curr, prev: curr > prev
 
-    opts, remainder = getopt.getopt(argv[1:], 'c:', [])
+    opts, remainder = getopt.getopt(argv[1:], 'e:', [])
     for opt, arg in opts:
-        if opt == '-c':
+        if opt == '-e':
             try:
-                track_if_true = eval('lambda n, p: ' + arg)
+                func_source = 'lambda n, p: ' + arg
+                track_if_true = eval(func_source)
             except:
                 error('Illegal check function "%s".\n"' +
                       'Example: "n > p + 100" is true if new measurement\n' +
