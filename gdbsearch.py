@@ -2,6 +2,44 @@
 
 # Author: antti.kervinen@intel.com
 
+"""
+Usage: gdbsearch gdb_command [options] [measure [paths_to_subroutines]]
+
+    gdb_command starts debugger with debugged program
+
+    measure (optional) specifies the function to be used
+        for evaluating the debugged program state after every step
+        taken by the debugger. Available measuring functions:
+        - %s
+
+    paths_to_subroutines is a list of paths where paths are
+        lists of indexes of "step" commands in gdb. If an index
+        is i, gdb will be given i "next" commands before "step".
+        Lists are given in Python format. Examples: 
+        "[[]]" debugging is started on only one function: main()
+        "[[2], [0, 1]]" will debug the two functions reached by
+        1) next - next - step, and
+        2) step - next - step in the start of main in gdb.
+
+    Options:
+        -e <expression>
+            track change deeper in the code if the expression
+            evaluates to True. Two variables defined for expression:
+            n: new measurement, p: previous measurement.
+            Default expression: "n > p"
+
+Examples:
+
+    gdbsearch "gdb ./myapp" private_mem
+        searches myapp program lines where memory consumption
+        (in terms of private memory) increases
+
+    gdbsearch -e "n > p + 100000" "gdb --args ./myapp myarg" io_rchar
+        runs "./myapp myarg" and searches program lines which cause
+        reading more than 100,000 bytes from any io source.
+
+"""
+
 import subprocess
 import select
 import getopt
@@ -9,44 +47,10 @@ import sys
 import os
 
 def print_usage():
-    print ''
-    print 'Usage: gdbsearch gdb_command [options] [measure [paths_to_subroutines]]'
-    print ''
-    print '    gdb_command starts debugger with debugged program'
-    print ''
-    print '    measure (optional) specifies the function to be used'
-    print '        for evaluating the debugged program state after every step'
-    print '        taken by the debugger. Available measuring functions:'
     l = [s[8:] for s in globals().keys() if s.startswith("measure_")]
     l.sort()
-    print '        - ' + '\n        - '.join(l)
-    print ''
-    print '    paths_to_subroutines is a list of paths where paths are'
-    print '        lists of indexes of "step" commands in gdb. If an index'
-    print '        is i, gdb will be given i "next" commands before "step".'
-    print '        Lists are given in Python format. Examples: '
-    print '        "[[]]" debugging is started on only one function: main()'
-    print '        "[[2], [0, 1]]" will debug the two functions reached by'
-    print '        1) next - next - step, and'
-    print '        2) step - next - step in the start of main in gdb.'
-    print ''
-    print '    Options:'
-    print '        -e <expression>'
-    print '            track change deeper in the code if the expression'
-    print '            evaluates to True. Two variables defined for expression:'
-    print '            n: new measurement, p: previous measurement.'
-    print '            Default expression: "n > p"'
-    print ''
-    print 'Examples:'
-    print ''
-    print '    gdbsearch "gdb ./myapp" private_mem'
-    print '        searches myapp program lines where memory consumption'
-    print '        (in terms of private memory) increases'
-    print ''
-    print '    gdbsearch -e "n > p + 100000" "gdb --args ./myapp myarg" io_rchar'
-    print '        runs "./myapp myarg" and searches program lines which cause'
-    print '        reading more than 100,000 bytes from any io source.'
-    print ''
+    s = '\n        - '.join(l)
+    print __doc__ % (s,)
 
 def error(msg):
     sys.stderr.write('ERROR: ' + msg + '\n')
