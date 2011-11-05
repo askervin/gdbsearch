@@ -43,6 +43,7 @@ Examples:
 import subprocess
 import select
 import getopt
+import cgi
 import sys
 import os
 
@@ -219,14 +220,88 @@ def walk_to_func(gdb, deeper_steps):
         step_index_in_current_func = 0
     return True
 
-def report_findings(results, current_path, deeper_steps):
-    for dc in deeper_steps:
+_all_findings = {}
+_depth_fullpath_file_row_values = []
+_file_not_found = {}
+def add_to_all_findings(filename, rownumber, previous_value, current_value, current_path, step):
+    if not filename in _all_findings:
+        if filename in _file_not_found: return
+        try: file(filename,"r")
+        except IOError: 
+            _file_not_found[filename]=1
+            return
+        _all_findings[filename] = []
+    _all_findings[filename].append((rownumber, previous_value, current_value, current_path))
+    _depth_fullpath_file_row_values.append((len(current_path), current_path + [step], filename, rownumber, previous_value, current_value))
+
+def report_findings(results, current_path, deeper_checks):
+    for dc in deeper_checks:
         step, current_value, previous_value = dc
         codeline = results[step][2]
         file_and_row = results[step][0]
+
+        try:
+            print "split", file_and_row
+            file_and_row = file_and_row.rsplit(" at ", 1)[1]
+            filename,rownumber = file_and_row.split(":")
+            print "got", filename, rownumber
+            add_to_all_findings(filename, int(rownumber), previous_value, current_value, current_path, step)
+        except ValueError: pass
+
         print "%s -> %s %s %s" % (previous_value, current_value,
                                file_and_row, codeline)
     flush()
+
+_html_print_bar_length=25
+def print_html(all_findings):
+    def steppath2filename(steppath):
+        pstr = str(steppath).replace(", [",".").replace(",","-").replace("[","").replace("]","").replace(" ","")
+        return "/tmp/gdbsearch%s.html" % (pstr,)
+    def html_ascii(f, score, line, hyperref, datavalue):
+        scorestr = (score * "#") + ( (_html_print_bar_length-score) * "-")
+        linestr = cgi.escape(line).replace(" ", "&nbsp;")
+        if hyperref != None: f.write('<a href="%s" title="measured value: %s">' % (hyperref, datavalue))
+        f.write('<kbd>%s%s</kbd>' % (scorestr, linestr))
+        if hyperref != None: f.write('</a>')
+        f.write('<br>\n')
+            
+    def print_code_html(filename, data):
+        try: totalvalue = sum([d[1] for d in data])
+        except: import pdb; pdb.set_trace()
+        nextline, nextvalue, nextpath = data.pop(0)
+        f = file(steppath2filename(nextpath[:-1]), "w")
+        f.write('<html><body><kbd>gdbsearch file:%s</kbd><br>\n' % (filename,))
+        for lineindex, line in enumerate(file(filename).xreadlines()):
+            lineno = lineindex + 1
+            if lineno != nextline:
+                html_ascii(f, 0, line.rstrip(), None, None)
+            else:
+                html_ascii(f, nextvalue*_html_print_bar_length/totalvalue, line.rstrip(), steppath2filename(nextpath), nextvalue)
+                try: nextline, nextvalue, nextpath = data.pop(0)
+                except: nextline = -1
+        f.write('</body></html>\n')
+
+    if not _depth_fullpath_file_row_values: return
+    _depth_fullpath_file_row_values.sort()
+    for d,fp,fn,ln,pv,cv in _depth_fullpath_file_row_values:
+        print d,fp,fn,ln,pv,cv
+
+    depth, fullpath, filename, lineno, previous_value, current_value = _depth_fullpath_file_row_values[0]
+    current_depth = depth
+    current_path = fullpath[:-1]
+    current_filename = filename
+    print_data = []
+    while _depth_fullpath_file_row_values:
+        depth, fullpath, filename, lineno, previous_value, current_value = _depth_fullpath_file_row_values.pop(0)
+        if fullpath[:-1] != current_path: # current_file handled, moving to next. print gathered data
+            if print_data:
+                print_code_html(current_filename, print_data)
+                print_data = []
+            current_depth = depth
+            current_path = fullpath[:-1]
+            current_filename = filename
+        print_data.append( (lineno, current_value - previous_value, fullpath) )
+    if print_data: print_code_html(current_filename, print_data)
 
 def main(argv):
     track_if_true = lambda curr, prev: curr > prev
@@ -288,11 +363,13 @@ def main(argv):
             results = step_and_measure_current_func(gdb, pid, measuring_func)
             deeper_checks = find_need_for_deeper_checks(results, track_if_true)
             report_findings(results, current_path, deeper_checks)
-    
+
             paths_to_interesting_subroutines += [current_path + [dc[0]] for dc in deeper_checks]
 
         quit_gdb(gdb)
+    
     print "all interesting paths examined"
+    print_html(_all_findings)
         
 if __name__ == '__main__':
     main(sys.argv)
