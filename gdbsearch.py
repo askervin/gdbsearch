@@ -40,6 +40,9 @@ Examples:
 
 """
 
+# TODO: support for multiple "step in"'s on one line
+# example: foo(bar(), baz()) should step in bar, baz and foo.
+
 import subprocess
 import select
 import getopt
@@ -60,7 +63,7 @@ def error(msg):
 def flush():
     sys.stdout.flush()
 
-def read_answer(pipe, maxlines = -1, timeout = 1):
+def read_answer(pipe, maxlines = -1, timeout = 5):
     """maxlines -1 means read until nothing to read until timeout"""
     lines = []
     while 1:
@@ -171,7 +174,7 @@ def step_and_measure_current_func(gdb, pid, measuring_func):
     bt = get_backtrace(gdb)
     orig_bt_length = len(bt) # if this changes, we are out of the func
     orig_func = bt[0].rsplit(':',1)[0] # everything before line number
-    print "debug: inspecting:", orig_func
+    print "measuring:", orig_func
     flush()
     data = measuring_func(gdb, pid)
     rows_and_data = [(bt[0].strip(), data, "")]
@@ -203,6 +206,7 @@ def find_need_for_deeper_checks(rows_and_data, track_if_true_function):
 def walk_to_func(gdb, deeper_steps):
     step_index_in_current_func = 0
     my_deeper_steps = [s for s in deeper_steps] # copy
+    print "walking:", deeper_steps
     while my_deeper_steps:
         next_deep_step = my_deeper_steps.pop(0)
         while step_index_in_current_func < next_deep_step:
@@ -220,19 +224,36 @@ def walk_to_func(gdb, deeper_steps):
         step_index_in_current_func = 0
     return True
 
+_search_file_path = []
+_search_file_cache = {}
+try: 
+    dirs = [s[4:] for s in file(os.path.expanduser("~/.gdbinit")).readlines() if s.startswith("dir")]
+    _search_file_path = [os.path.expanduser(d).strip() for d in dirs]
+except Exception, e: print "FYI:", e
+def search_file(filename):
+    if not filename in _search_file_cache:
+        if os.access(filename, os.R_OK):
+            _search_file_cache[filename] = filename
+        else:
+            for p in _search_file_path:
+                if os.access(p + os.sep + filename, os.R_OK):
+                    _search_file_cache[filename] = p + os.sep + filename
+                break
+    return _search_file_cache[filename]
+
 _all_findings = {}
 _depth_fullpath_file_row_values = []
 _file_not_found = {}
 def add_to_all_findings(filename, rownumber, previous_value, current_value, current_path, step):
     if not filename in _all_findings:
         if filename in _file_not_found: return
-        try: file(filename,"r")
-        except IOError: 
+        readable_filename = search_file(filename)
+        if not readable_filename:
             _file_not_found[filename]=1
             return
         _all_findings[filename] = []
     _all_findings[filename].append((rownumber, previous_value, current_value, current_path))
-    _depth_fullpath_file_row_values.append((len(current_path), current_path + [step], filename, rownumber, previous_value, current_value))
+    _depth_fullpath_file_row_values.append((len(current_path), current_path + [step], search_file(filename), rownumber, previous_value, current_value))
 
 def report_findings(results, current_path, deeper_checks):
     for dc in deeper_checks:
@@ -241,27 +262,34 @@ def report_findings(results, current_path, deeper_checks):
         file_and_row = results[step][0]
 
         try:
-            print "split", file_and_row
             file_and_row = file_and_row.rsplit(" at ", 1)[1]
             filename,rownumber = file_and_row.split(":")
-            print "got", filename, rownumber
             add_to_all_findings(filename, int(rownumber), previous_value, current_value, current_path, step)
-        except ValueError: pass
+        except ValueError:
+            print "ADDING RESULT ROW FAILED:", file_and_row
 
         print "%s -> %s %s %s" % (previous_value, current_value,
                                file_and_row, codeline)
     flush()
 
-_html_print_bar_length=25
-def print_html(all_findings):
+_html_print_bar_length=20
+def print_html():
     def steppath2filename(steppath):
-        pstr = str(steppath).replace(", [",".").replace(",","-").replace("[","").replace("]","").replace(" ","")
+        pstr = str(steppath).replace(", [",".").replace(",","-").translate(None, "[] ")
         return "/tmp/gdbsearch%s.html" % (pstr,)
-    def html_ascii(f, score, line, hyperref, datavalue):
+    def html_ascii(f, score, line, hyperref, datavalue, rowid):
         scorestr = (score * "#") + ( (_html_print_bar_length-score) * "-")
-        linestr = cgi.escape(line).replace(" ", "&nbsp;")
-        if hyperref != None: f.write('<a href="%s" title="measured value: %s">' % (hyperref, datavalue))
-        f.write('<kbd>%s%s</kbd>' % (scorestr, linestr))
+        if rowid != None:
+            scorestr = scorestr[:-2]
+            if hyperref != None: scorestr = '<a href="%s" title="measured delta: %s" name="%s">%s</a>' % (hyperref, datavalue, rowid, scorestr)
+            scorestr += '<a href="#%s">p</a>' % (rowid - 1,)
+            scorestr += '<a href="#%s">n</a>' % (rowid + 1,)
+        ws = " " * (len(line) - len(line.lstrip()))
+        if hyperref:
+            linestr = ws.replace(" ", "&nbsp;") + ('<a href="%s">' % (hyperref,)) + cgi.escape(line.lstrip()).replace(" ", "&nbsp;") + '</a>'
+        else:
+            linestr = ws.replace(" ", "&nbsp;") + cgi.escape(line.lstrip()).replace(" ", "&nbsp;")
+        f.write('<kbd>%s</kbd><kbd>%s</kbd>' % (scorestr, linestr))
         if hyperref != None: f.write('</a>')
         f.write('<br>\n')
             
@@ -270,13 +298,15 @@ def print_html(all_findings):
         except: import pdb; pdb.set_trace()
         nextline, nextvalue, nextpath = data.pop(0)
         f = file(steppath2filename(nextpath[:-1]), "w")
-        f.write('<html><body><kbd>gdbsearch file:%s</kbd><br>\n' % (filename,))
+        f.write('<html><body><kbd>gdbsearch file:%s, <a name="#0" href="#1"><kbd>first hit</kbd></a></kbd><br>\n' % (filename,))
+        rowid = 0
         for lineindex, line in enumerate(file(filename).xreadlines()):
             lineno = lineindex + 1
             if lineno != nextline:
-                html_ascii(f, 0, line.rstrip(), None, None)
+                html_ascii(f, 0, line.rstrip(), None, None, None)
             else:
-                html_ascii(f, nextvalue*_html_print_bar_length/totalvalue, line.rstrip(), steppath2filename(nextpath), nextvalue)
+                rowid += 1
+                html_ascii(f, nextvalue*_html_print_bar_length/totalvalue, line.rstrip(), steppath2filename(nextpath), nextvalue, rowid)
                 try: nextline, nextvalue, nextpath = data.pop(0)
                 except: nextline = -1
         f.write('</body></html>\n')
@@ -300,13 +330,21 @@ def print_html(all_findings):
             current_depth = depth
             current_path = fullpath[:-1]
             current_filename = filename
-        print_data.append( (lineno, current_value - previous_value, fullpath) )
+        existing_line_data = [l for l in print_data if l[0] == lineno]
+        if existing_line_data:
+            existing_index = print_data.index(existing_line_data[0])
+            print_data[existing_index] = (lineno,
+                                          existing_line_data[0][1] + (current_value - previous_value),
+                                          existing_line_data[0][2]) # keep the first full path in data
+        else:
+            print_data.append( (lineno, current_value - previous_value, fullpath) )
     if print_data: print_code_html(current_filename, print_data)
 
 def main(argv):
+    global _depth_fullpath_file_row_values
     track_if_true = lambda curr, prev: curr > prev
 
-    opts, remainder = getopt.getopt(argv[1:], 'e:', [])
+    opts, remainder = getopt.getopt(argv[1:], 'o:e:', [])
     for opt, arg in opts:
         if opt == '-e':
             try:
@@ -316,6 +354,8 @@ def main(argv):
                 error('Illegal check function "%s".\n"' +
                       'Example: "n > p + 100" is true if new measurement\n' +
                       'was greater than previous by 100')
+        elif opt == '-o':
+            _depth_fullpath_file_row_values = eval(file(arg).read())
 
     # 1st parameter: gdb command
     try:
@@ -369,7 +409,8 @@ def main(argv):
         quit_gdb(gdb)
     
     print "all interesting paths examined"
-    print_html(_all_findings)
-        
+    file("/tmp/gdbsearch.data","w").write(repr(_depth_fullpath_file_row_values))
+    print_html()
+
 if __name__ == '__main__':
     main(sys.argv)
