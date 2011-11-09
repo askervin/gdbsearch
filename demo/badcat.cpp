@@ -11,10 +11,11 @@ void printFile(QFile &f)
 void printFileTwice(QFile &f)
 {
     f.open(QIODevice::ReadOnly);
-    std::cout << f.readAll().data() << std::flush;
+    std::cout << f.readAll().data();
     f.close();
     f.open(QIODevice::ReadOnly);
-    std::cout << f.readAll().data() << std::flush;
+    std::cout << f.readAll().data();
+    std::cout << std::flush;
     f.close();
 }
 

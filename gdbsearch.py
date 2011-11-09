@@ -220,6 +220,8 @@ def walk_to_func(gdb, deeper_steps):
         if bt_in_new_func[0].startswith(bt_in_current_func[0].split(':')[0]):
             # function didn't really change. we have traced this
             # deeper_steps path to the bottom.
+            print "STEP IN FAILED: expected start:", bt_in_current_func[0].split(':')[0]
+            print "STEP IN FAILED: observed start:", bt_in_new_func[0]
             return False
         step_index_in_current_func = 0
     return True
