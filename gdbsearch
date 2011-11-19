@@ -1,9 +1,9 @@
 #!/usr/bin/env python
 
-# Author: antti.kervinen@intel.com
+# Author: antti.kervinen@gmail.com
 
 """
-Usage: gdbsearch gdb_command [options] [measure [paths_to_subroutines]]
+Usage: gdbsearch [options] gdb_command [measure [paths_to_subroutines]]
 
     gdb_command starts debugger with debugged program
 
@@ -14,19 +14,29 @@ Usage: gdbsearch gdb_command [options] [measure [paths_to_subroutines]]
 
     paths_to_subroutines is a list of paths where paths are
         lists of indexes of "step" commands in gdb. If an index
-        is i, gdb will be given i "next" commands before "step".
+        is i, gdb will be given i "step-finish" commands before "step".
         Lists are given in Python format. Examples: 
         "[[]]" debugging is started on only one function: main()
         "[[2], [0, 1]]" will debug the two functions reached by
-        1) next - next - step, and
-        2) step - next - step in the start of main in gdb.
+        1) step-finish - step-finish - step, and
+        2) step-finish - step-finish - step in the start of main in gdb.
 
     Options:
+        -d  print data instead of html (the default is: %s)
+
         -e <expression>
             track change deeper in the code if the expression
             evaluates to True. Two variables defined for expression:
             n: new measurement, p: previous measurement.
-            Default expression: "n > p"
+            Default expression: "%s".
+
+        -l <data file>
+            load old data from <data file> and render it into html
+            without running gdb.
+
+        -o <output directory>
+            write html files to output directory.
+            Default output directory: "%s".
 
 Examples:
 
@@ -40,8 +50,9 @@ Examples:
 
 """
 
-# TODO: support for multiple "step in"'s on one line
-# example: foo(bar(), baz()) should step in bar, baz and foo.
+_output_directory = "/tmp"
+_trace_if_true_func_expr = "n > p"
+_print_data = False
 
 import subprocess
 import select
@@ -54,7 +65,7 @@ def print_usage():
     l = [s[8:] for s in globals().keys() if s.startswith("measure_")]
     l.sort()
     s = '\n        - '.join(l)
-    print __doc__ % (s,)
+    print __doc__ % (s, _print_data, _trace_if_true_func_expr, _output_directory)
 
 def error(msg):
     sys.stderr.write('ERROR: ' + msg + '\n')
@@ -85,7 +96,6 @@ def expect_prompt(answer):
         error('Did not receive the gdb prompt. Got:\n' + ''.join(answer))
 
 def start_gdb(gdb_command):
-    """returns gdb_pipes"""
     gdb = subprocess.Popen(gdb_command, shell=True,
                            stdin=subprocess.PIPE,
                            stdout=subprocess.PIPE)
@@ -93,7 +103,7 @@ def start_gdb(gdb_command):
     expect_prompt(answer)
     return gdb
 
-def run_to_start_of_main(gdb):
+def run_to_main(gdb):
     gdb.stdin.write('break main\n')
     bp_row, gdb_prompt = read_answer(gdb.stdout, 5)
     if not bp_row.startswith('Breakpoint 1 at'):
@@ -116,9 +126,25 @@ def get_backtrace(gdb):
     expect_prompt(rows)
     return rows[:-1]
 
-def next_row(gdb):
-    gdb.stdin.write('next\n')
+def get_frame(gdb):
+    gdb.stdin.write('info frame\n')
     rows = read_answer(gdb.stdout)
+    expect_prompt(rows)
+    try: return rows[0].split()[5]
+    except: return None
+
+def next_row(gdb):
+    depth_before = len(get_backtrace(gdb))
+
+    gdb.stdin.write('step\n')
+    rows = read_answer(gdb.stdout)
+
+    depth_now = len(get_backtrace(gdb))
+    while depth_now > depth_before:
+        gdb.stdin.write('finish\n')
+        rows = read_answer(gdb.stdout)
+        depth_now = len(get_backtrace(gdb))
+
     if len(rows) > 1:
         codeline = rows[-2]
     else:
@@ -171,10 +197,11 @@ def measure_fd_count(gdb, pid):
     return len(os.walk("/proc/%s/fd" % (pid,)).next()[2])
 
 def step_and_measure_current_func(gdb, pid, measuring_func):
+    print "****************************************** step and measure "
     bt = get_backtrace(gdb)
     orig_bt_length = len(bt) # if this changes, we are out of the func
-    orig_func = bt[0].rsplit(':',1)[0] # everything before line number
-    print "measuring:", orig_func
+    orig_frame = get_frame(gdb)
+    print "measuring:", orig_frame
     flush()
     data = measuring_func(gdb, pid)
     rows_and_data = [(bt[0].strip(), data, "")]
@@ -183,22 +210,29 @@ def step_and_measure_current_func(gdb, pid, measuring_func):
         bt = get_backtrace(gdb)
         if (len(bt) < 1 or
             len(bt) != orig_bt_length or
-            not bt[0].startswith(orig_func)):
-            # we are out of the func!
+            get_frame(gdb) != orig_frame):
+            # we are out of the frame!
             break
         data = measuring_func(gdb, pid)
         rows_and_data.append((bt[0].strip(), data, codeline))
     return rows_and_data
 
-def find_need_for_deeper_checks(rows_and_data, track_if_true_function):
+def find_need_for_deeper_checks(rows_and_data, trace_if_true_func):
     steps = []
     step = 0
     if len(rows_and_data) == 0: return steps
     previous_value = rows_and_data[0][1]
     for row_and_data in rows_and_data[1:]:
         current_value = row_and_data[1]
-        if track_if_true_function(current_value, previous_value):
-            steps.append((step, current_value, previous_value))
+        if trace_if_true_func(current_value, previous_value):
+            try:
+                file_and_row = row_and_data[0].rsplit(" at ", 1)[1]
+                if search_file(file_and_row.split(":")[0]):
+                    steps.append((step, current_value, previous_value))
+                else:
+                    print "File not found: '%s', not going deeper" % (file_and_row.split(":")[0],)
+            except:
+                print "FILENAME PARSING FAILED FROM '%s'" % (row_and_data[0],)
         previous_value = current_value
         step += 1
     return steps
@@ -212,7 +246,7 @@ def walk_to_func(gdb, deeper_steps):
         while step_index_in_current_func < next_deep_step:
             next_row(gdb)
             step_index_in_current_func += 1
-        # now we are ready to take step into subroutine make sure that
+        # Now we are ready to take step into subroutine. Make sure that
         # we enter one by checking backtrace
         bt_in_current_func = get_backtrace(gdb)
         step_into_subroutine(gdb)
@@ -241,6 +275,8 @@ def search_file(filename):
                 if os.access(p + os.sep + filename, os.R_OK):
                     _search_file_cache[filename] = p + os.sep + filename
                 break
+    if not filename in _search_file_cache:
+        return None
     return _search_file_cache[filename]
 
 _all_findings = {}
@@ -278,45 +314,61 @@ _html_print_bar_length=20
 def print_html():
     def steppath2filename(steppath):
         pstr = str(steppath).replace(", [",".").replace(",","-").translate(None, "[] ")
-        return "/tmp/gdbsearch%s.html" % (pstr,)
-    def html_ascii(f, score, line, hyperref, datavalue, rowid):
-        scorestr = (score * "#") + ( (_html_print_bar_length-score) * "-")
+        return "gdbsearch%s.html" % (pstr,)
+    def html_ascii(f, scores, totalscore, line, hyperrefs, rowid):
+        scorebar = sum(scores) * _html_print_bar_length / totalscore
+        scorestr = (scorebar * "#") + ( (_html_print_bar_length - scorebar) * "-")
         if rowid != None:
             scorestr = scorestr[:-2]
-            if hyperref != None: scorestr = '<a href="%s" title="measured delta: %s" name="%s">%s</a>' % (hyperref, datavalue, rowid, scorestr)
-            scorestr += '<a href="#%s">p</a>' % (rowid - 1,)
-            scorestr += '<a href="#%s">n</a>' % (rowid + 1,)
+            scoretitle = ""
+            for i, score in enumerate(scores):
+                scoretitle += "frame %s: %s  " % (i+1, score)
+            if hyperrefs != None:
+                scorestr = '<a href="%s" title="%s" name="%s">%s</a>' % (
+                    steppath2filename(hyperrefs[0]), scoretitle, rowid, scorestr)
+            scorestr += '<a href="#%s">&lt</a>' % (rowid - 1,)
+            scorestr += '<a href="#%s">&gt</a>' % (rowid + 1,)
         ws = " " * (len(line) - len(line.lstrip()))
-        if hyperref:
-            linestr = ws.replace(" ", "&nbsp;") + ('<a href="%s">' % (hyperref,)) + cgi.escape(line.lstrip()).replace(" ", "&nbsp;") + '</a>'
+        if hyperrefs:
+            print hyperrefs
+            if len(hyperrefs)==1:
+                linestr = ws.replace(" ", "&nbsp;") + ('<a href="%s">' % (
+                        steppath2filename(hyperrefs[0]),)) + cgi.escape(line.lstrip()).replace(" ", "&nbsp;") + '</a>'
+            else:
+                linestr = ws.replace(" ", "&nbsp;") + cgi.escape(line.lstrip()).replace(" ", "&nbsp;")
+                for i, hyperref in enumerate(hyperrefs):
+                    linestr += '<a href="%s">[frame %s]</a>&nbsp;' % (steppath2filename(hyperref), i+1)
         else:
             linestr = ws.replace(" ", "&nbsp;") + cgi.escape(line.lstrip()).replace(" ", "&nbsp;")
         f.write('<kbd>%s</kbd><kbd>%s</kbd>' % (scorestr, linestr))
-        if hyperref != None: f.write('</a>')
         f.write('<br>\n')
             
     def print_code_html(filename, data):
         try: totalvalue = sum([d[1] for d in data])
         except: import pdb; pdb.set_trace()
         nextline, nextvalue, nextpath = data.pop(0)
-        f = file(steppath2filename(nextpath[:-1]), "w")
+        f = file(_output_directory + steppath2filename(nextpath[:-1]), "w")
         f.write('<html><body><kbd>gdbsearch file:%s, <a name="#0" href="#1"><kbd>first hit</kbd></a></kbd><br>\n' % (filename,))
         rowid = 0
         for lineindex, line in enumerate(file(filename).xreadlines()):
             lineno = lineindex + 1
             if lineno != nextline:
-                html_ascii(f, 0, line.rstrip(), None, None, None)
+                html_ascii(f, [0], 1, line.rstrip(), None, None)
             else:
+                nextvalues = [nextvalue]
+                nextpaths = [nextpath]
+                while data and data[0][0] == nextline: # more data on the same line
+                    _, nextvalue, nextpath = data.pop(0)
+                    nextvalues.append(nextvalue)
+                    nextpaths.append(nextpath)
                 rowid += 1
-                html_ascii(f, nextvalue*_html_print_bar_length/totalvalue, line.rstrip(), steppath2filename(nextpath), nextvalue, rowid)
+                html_ascii(f, nextvalues, totalvalue, line.rstrip(), nextpaths, rowid)
                 try: nextline, nextvalue, nextpath = data.pop(0)
                 except: nextline = -1
         f.write('</body></html>\n')
 
     if not _depth_fullpath_file_row_values: return
     _depth_fullpath_file_row_values.sort()
-    for d,fp,fn,ln,pv,cv in _depth_fullpath_file_row_values:
-        print d,fp,fn,ln,pv,cv
 
     depth, fullpath, filename, lineno, previous_value, current_value = _depth_fullpath_file_row_values[0]
     current_depth = depth
@@ -332,32 +384,51 @@ def print_html():
             current_depth = depth
             current_path = fullpath[:-1]
             current_filename = filename
-        existing_line_data = [l for l in print_data if l[0] == lineno]
-        if existing_line_data:
-            existing_index = print_data.index(existing_line_data[0])
-            print_data[existing_index] = (lineno,
-                                          existing_line_data[0][1] + (current_value - previous_value),
-                                          existing_line_data[0][2]) # keep the first full path in data
-        else:
-            print_data.append( (lineno, current_value - previous_value, fullpath) )
+        print_data.append( (lineno, current_value - previous_value, fullpath) )
     if print_data: print_code_html(current_filename, print_data)
 
 def main(argv):
     global _depth_fullpath_file_row_values
+    global _output_directory
+    global _trace_if_true_func_expr
+    global _print_data
     track_if_true = lambda curr, prev: curr > prev
 
-    opts, remainder = getopt.getopt(argv[1:], 'o:e:', [])
+    opts, remainder = getopt.getopt(argv[1:], 'dhl:e:o:', [])
     for opt, arg in opts:
+        if opt == '-d':
+            _print_data = True
         if opt == '-e':
-            try:
-                func_source = 'lambda n, p: ' + arg
-                track_if_true = eval(func_source)
-            except:
-                error('Illegal check function "%s".\n"' +
-                      'Example: "n > p + 100" is true if new measurement\n' +
-                      'was greater than previous by 100')
-        elif opt == '-o':
+            _trace_if_true_func_expr = arg
+        elif opt == '-h':
+            print_usage()
+            return
+        elif opt == '-l':
             _depth_fullpath_file_row_values = eval(file(arg).read())
+        elif opt == "-o":
+            _output_directory = arg
+
+    if _output_directory and _output_directory[-1] != os.sep:
+        _output_directory += os.sep
+        if not os.access(_output_directory, os.W_OK):
+            try: os.makedirs(_output_directory)
+            except Exception, e:
+                print "Cannot write to '%s'." % (_output_directory,)
+                print "    (%s)" % (e,)
+                sys.exit(1)
+
+    if _depth_fullpath_file_row_values:
+        print_html()
+        return
+
+    try:
+        func_source = 'lambda n, p: ' + _trace_if_true_func_expr
+        trace_if_true_func = eval(func_source)
+    except:
+        error('Illegal check function "%s".\n"' +
+              'Example: "n > p + 100" is true if new measurement\n' +
+              'was greater than previous by 100')
+
 
     # 1st parameter: gdb command
     try:
@@ -398,21 +469,22 @@ def main(argv):
         current_path = paths_to_interesting_subroutines.pop(0)
 
         gdb = start_gdb(gdb_command)
-        run_to_start_of_main(gdb)
+        run_to_main(gdb)
         pid = get_pid_of_debugged_process(gdb)
         
         if walk_to_func(gdb, current_path):
             results = step_and_measure_current_func(gdb, pid, measuring_func)
-            deeper_checks = find_need_for_deeper_checks(results, track_if_true)
+            deeper_checks = find_need_for_deeper_checks(results, trace_if_true_func)
             report_findings(results, current_path, deeper_checks)
 
             paths_to_interesting_subroutines += [current_path + [dc[0]] for dc in deeper_checks]
 
+        if not _print_data: print_html()
+
         quit_gdb(gdb)
-    
-    print "all interesting paths examined"
-    file("/tmp/gdbsearch.data","w").write(repr(_depth_fullpath_file_row_values))
-    print_html()
+
+    if _print_data:
+        file(_output_directory + "gdbsearch.data","w").write(repr(_depth_fullpath_file_row_values))
 
 if __name__ == '__main__':
     main(sys.argv)
