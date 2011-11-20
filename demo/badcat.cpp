@@ -19,6 +19,15 @@ void printFileTwice(QFile &f)
     f.close();
 }
 
+QFile& printAndReturnFile(QFile &f)
+{
+    f.open(QIODevice::ReadOnly);
+    std::cout << f.readAll().data();
+    f.close();
+    std::cout << std::flush;
+    return f;
+}
+
 int main(int argc, char **argv)
 {
     for (int i = 1; i < argc; i++)
@@ -27,7 +36,7 @@ int main(int argc, char **argv)
         f.open(QIODevice::ReadOnly);
         printFile(f);
         f.close();
-        printFileTwice(f);
+        printFileTwice(printAndReturnFile(f));
     }
     eatmemory();
 }
