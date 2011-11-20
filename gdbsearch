@@ -74,6 +74,40 @@ import cgi
 import sys
 import os
 
+# Measuring functions receives gdb process object (with pipes) and pid
+# as parameters. They return a numeric value. A measuring function is
+# called before and after every step of analysed program code. Name
+# function that measures xyz as "measure_xyz". It will be listed in
+# "-h" output, and used when gdbsearch is started with "xyz" as a
+# measuring function command line parameter.
+
+def _sum_integers(filename, line_prefix, field_index):
+    total = 0
+    for line in file(filename):
+        if line.startswith(line_prefix):
+            total += int(line.split()[field_index])
+    return total
+ 
+def measure_private_dirty(gdb, pid):
+    return _sum_integers("/proc/%s/smaps" % (pid,),
+                         "Private_Dirty:", 1)
+
+def measure_private_mem(gdb, pid):
+    return _sum_integers("/proc/%s/smaps" % (pid,),
+                         "Private_", 1)
+
+def measure_io_rchar(gdb, pid):
+    return _sum_integers("/proc/%s/io" % (pid,),
+                         "rchar:", 1)
+
+def measure_io_wchar(gdb, pid):
+    return _sum_integers("/proc/%s/io" % (pid,),
+                         "wchar:", 1)
+
+def measure_fd_count(gdb, pid):
+    return len(os.walk("/proc/%s/fd" % (pid,)).next()[2])
+
+
 def print_usage():
     l = [s[8:] for s in globals().keys() if s.startswith("measure_")]
     l.sort()
@@ -176,41 +210,8 @@ def quit_gdb(gdb):
         gdb.stdin.write('y\n')
     except: pass
 
-# Measuring functions take gdb and pid as parameters and return a
-# number describing the current state of the process. Measuring
-# function is called after every step of the measured function. If the
-# returned valude is greater than it was before the previous step, the
-# previous step will be examined in more detail by later debugger
-# runs. Prefix the function names with 'measure_'
-
-def _sum_integers(filename, line_prefix, field_index):
-    total = 0
-    for line in file(filename):
-        if line.startswith(line_prefix):
-            total += int(line.split()[field_index])
-    return total
- 
-def measure_private_dirty(gdb, pid):
-    return _sum_integers("/proc/%s/smaps" % (pid,),
-                         "Private_Dirty:", 1)
-
-def measure_private_mem(gdb, pid):
-    return _sum_integers("/proc/%s/smaps" % (pid,),
-                         "Private_", 1)
-
-def measure_io_rchar(gdb, pid):
-    return _sum_integers("/proc/%s/io" % (pid,),
-                         "rchar:", 1)
-
-def measure_io_wchar(gdb, pid):
-    return _sum_integers("/proc/%s/io" % (pid,),
-                         "wchar:", 1)
-
-def measure_fd_count(gdb, pid):
-    return len(os.walk("/proc/%s/fd" % (pid,)).next()[2])
 
 def step_and_measure_current_func(gdb, pid, measuring_func):
-    print "****************************************** step and measure "
     bt = get_backtrace(gdb)
     orig_bt_length = len(bt) # if this changes, we are out of the func
     orig_frame = get_frame(gdb)
@@ -278,7 +279,7 @@ _search_file_cache = {}
 try: 
     dirs = [s[4:] for s in file(os.path.expanduser("~/.gdbinit")).readlines() if s.startswith("dir")]
     _search_file_path = [os.path.expanduser(d).strip() for d in dirs]
-except Exception, e: print "FYI:", e
+except Exception, e: print "Cannot read .gdbinit for locating source codes.", e
 def search_file(filename):
     if not filename in _search_file_cache:
         if os.access(filename, os.R_OK):
@@ -343,7 +344,6 @@ def print_html():
             scorestr += '<a href="#%s">&gt</a>' % (rowid + 1,)
         ws = " " * (len(line) - len(line.lstrip()))
         if hyperrefs:
-            print hyperrefs
             if len(hyperrefs)==1:
                 linestr = ws.replace(" ", "&nbsp;") + ('<a href="%s">' % (
                         steppath2filename(hyperrefs[0]),)) + cgi.escape(line.lstrip()).replace(" ", "&nbsp;") + '</a>'
@@ -357,6 +357,7 @@ def print_html():
         f.write('<br>\n')
             
     def print_code_html(filename, data):
+        data.sort()
         try: totalvalue = sum([d[1] for d in data])
         except: import pdb; pdb.set_trace()
         nextline, nextvalue, nextpath = data.pop(0)
@@ -407,7 +408,13 @@ def main(argv):
     global _print_data
     track_if_true = lambda curr, prev: curr > prev
 
-    opts, remainder = getopt.getopt(argv[1:], 'dhl:e:o:', [])
+    try:
+        opts, remainder = getopt.getopt(argv[1:], 'dhl:e:o:', [])
+    except Exception, e:
+        print_usage()
+        print e
+        sys.exit(1)
+
     for opt, arg in opts:
         if opt == '-d':
             _print_data = True
@@ -472,10 +479,7 @@ def main(argv):
         # path to main is []: no steps to subroutines
         paths_to_interesting_subroutines = [[]]
 
-    print 'gdb command: %s' % (gdb_command,)
-    print 'paths to inspected subroutines: %s' % (paths_to_interesting_subroutines,)
-    print 'measuring function: %s' % (measuring_func.__name__,)
-
+    # step, measure and report
     while paths_to_interesting_subroutines:
 
         current_path = paths_to_interesting_subroutines.pop(0)
