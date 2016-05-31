@@ -28,7 +28,7 @@ Usage: gdbsearch [options] gdb_command [measure [paths_to_subroutines]]
     paths_to_subroutines is a list of paths where paths are
         lists of indexes of "step" commands in gdb. If an index
         is i, gdb will be given i "step-finish" commands before "step".
-        Lists are given in Python format. Examples: 
+        Lists are given in Python format. Examples:
         "[[]]" debugging is started on only one function: main()
         "[[2], [0, 1]]" will debug the two functions reached by
         1) step-finish - step-finish - step, and
@@ -87,7 +87,7 @@ def _sum_integers(filename, line_prefix, field_index):
         if line.startswith(line_prefix):
             total += int(line.split()[field_index])
     return total
- 
+
 def measure_private_dirty(gdb, pid):
     return _sum_integers("/proc/%s/smaps" % (pid,),
                          "Private_Dirty:", 1)
@@ -134,7 +134,7 @@ def read_answer(pipe, maxlines = -1, timeout = 5):
             if lines[-1][-1] == '\n':
                 if len(lines) == maxlines: break
                 else: lines.append("")
-            if lines[-1] == '(gdb) ': 
+            if lines[-1] == '(gdb) ':
                 break # got prompt, nothing more is coming
     return lines
 
@@ -156,7 +156,7 @@ def run_to_main(gdb):
     if not bp_row.startswith('Breakpoint 1 at'):
         error("Could not set breakpoint to main. Got error:\n" + bp_row)
     gdb.stdin.write('run\n')
-    rows = read_answer(gdb.stdout, 6, 8)
+    rows = read_answer(gdb.stdout, 7, 8)
     expect_prompt(rows)
 
 def get_pid_of_debugged_process(gdb):
@@ -276,7 +276,7 @@ def walk_to_func(gdb, deeper_steps):
 
 _search_file_path = []
 _search_file_cache = {}
-try: 
+try:
     dirs = [s[4:] for s in file(os.path.expanduser("~/.gdbinit")).readlines() if s.startswith("dir")]
     _search_file_path = [os.path.expanduser(d).strip() for d in dirs]
 except Exception, e: print "Cannot read .gdbinit for locating source codes.", e
@@ -355,7 +355,7 @@ def print_html():
             linestr = ws.replace(" ", "&nbsp;") + cgi.escape(line.lstrip()).replace(" ", "&nbsp;")
         f.write('<kbd>%s</kbd><kbd>%s</kbd>' % (scorestr, linestr))
         f.write('<br>\n')
-            
+
     def print_code_html(filename, data):
         data.sort()
         try: totalvalue = sum([d[1] for d in data])
@@ -475,7 +475,7 @@ def main(argv):
             if type(paths_to_interesting_subroutines) != type([]): raise Exception()
         except:
             error('Invalid paths to subroutines')
-    else:    
+    else:
         # path to main is []: no steps to subroutines
         paths_to_interesting_subroutines = [[]]
 
@@ -487,7 +487,7 @@ def main(argv):
         gdb = start_gdb(gdb_command)
         run_to_main(gdb)
         pid = get_pid_of_debugged_process(gdb)
-        
+
         if walk_to_func(gdb, current_path):
             results = step_and_measure_current_func(gdb, pid, measuring_func)
             deeper_checks = find_need_for_deeper_checks(results, trace_if_true_func)
